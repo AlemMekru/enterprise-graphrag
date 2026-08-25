@@ -10,7 +10,7 @@ GraphRAG extends retrieval-augmented generation (RAG) with a knowledge graph. Tr
 
 Enterprise knowledge is fragmented across policies, reports, contracts, and internal documentation. Pure vector search can find similar passages but may miss relationships between people, systems, business units, and events. Enterprise GraphRAG is designed to ingest that content, represent its structure in Neo4j, retrieve relevant graph and vector context, and produce grounded answers with source citations.
 
-This repository currently contains the professional project foundation. The ingestion and GraphRAG pipeline components are intentionally not implemented yet.
+Phase 1 is implemented: the project can load text, Markdown, and PDF documents and split them into deterministic, provenance-preserving chunks. Embeddings, graph construction, entity extraction, retrieval, and answer generation remain intentionally out of scope for this phase.
 
 ## Architecture
 
@@ -47,7 +47,8 @@ The codebase is organized by responsibility:
 
 ## Planned capabilities
 
-- Configurable enterprise document ingestion and chunking
+- [x] Configurable `.txt`, `.md`, and `.pdf` document ingestion
+- [x] Deterministic chunking with overlap and source provenance
 - Structured entity and relationship extraction
 - Idempotent knowledge-graph construction in Neo4j
 - Embedding generation and Neo4j vector indexes
@@ -99,6 +100,29 @@ Run the test suite with:
 pytest
 ```
 
+## Document ingestion
+
+`DocumentLoader` normalizes supported source files into a shared `Document` model. It uses `pypdf` for PDF extraction and reports explicit errors for unsupported, empty, missing, unreadable, or malformed documents.
+
+`TextChunker` produces stable character windows with configurable overlap. Every `DocumentChunk` includes its parent document ID, sequential index, source metadata, and character offsets, making the output suitable for both embedding and knowledge-graph pipelines.
+
+Configure chunking in `.env`:
+
+```dotenv
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=200
+```
+
+The overlap must be non-negative and smaller than the chunk size. To process a document programmatically:
+
+```python
+from app.ingestion import DocumentIngestionPipeline
+
+document, chunks = DocumentIngestionPipeline().ingest(
+    "data/sample/information-security-policy.md"
+)
+```
+
 ## API
 
 | Method | Endpoint | Description |
@@ -111,7 +135,17 @@ Configuration is loaded from environment variables. Secrets belong only in a loc
 
 ## Project status
 
-Foundation phase. The service shell, configuration model, container setup, and health test are ready for incremental GraphRAG implementation.
+This project is being developed incrementally, with each phase building on the previous one:
+
+- [x] **Foundation:** FastAPI service, environment configuration, Neo4j container setup, health endpoint, and initial tests
+- [x] **Phase 1 — Document ingestion and chunking:** TXT, Markdown, and PDF ingestion; deterministic overlapping chunks; source metadata preservation; and unit test coverage
+- [ ] **Phase 2 — Embeddings and vector indexing**
+- [ ] **Phase 3 — Entity and relationship extraction**
+- [ ] **Phase 4 — Neo4j knowledge-graph construction**
+- [ ] **Phase 5 — Hybrid GraphRAG retrieval**
+- [ ] **Phase 6 — Grounded answer generation and source citations**
+
+Current milestone: **Phase 1 complete.**
 
 ## Author
 

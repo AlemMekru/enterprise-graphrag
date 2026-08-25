@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,9 +20,12 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
 
+    chunk_size: int = 1_000
+    chunk_overlap: int = 200
+
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: SecretStr
+    neo4j_password: SecretStr | None = None
     neo4j_database: str = "neo4j"
 
     llm_provider: Literal["openai", "azure_openai"] = "openai"
@@ -35,6 +38,17 @@ class Settings(BaseSettings):
     azure_openai_api_version: str | None = None
     azure_openai_chat_deployment: str | None = None
     azure_openai_embedding_deployment: str | None = None
+
+    @model_validator(mode="after")
+    def validate_chunk_configuration(self) -> "Settings":
+        """Reject chunk settings that cannot make forward progress."""
+        if self.chunk_size <= 0:
+            raise ValueError("CHUNK_SIZE must be greater than zero")
+        if self.chunk_overlap < 0:
+            raise ValueError("CHUNK_OVERLAP cannot be negative")
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("CHUNK_OVERLAP must be smaller than CHUNK_SIZE")
+        return self
 
 
 @lru_cache
