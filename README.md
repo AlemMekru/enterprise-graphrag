@@ -112,3 +112,12 @@ Configuration is loaded from environment variables. Secrets belong only in a loc
 ## Project status
 
 Foundation phase. The service shell, configuration model, container setup, and health test are ready for incremental GraphRAG implementation.
+
+## Author
+
+**Alem Mekru**
+
+AI Engineer | MSc Artificial Intelligence | Doctoral Researcher in Applied Artificial Intelligence
+
+- GitHub: https://github.com/AlemMekru
+- LinkedIn: https://www.linkedin.com/in/alemmekru/
