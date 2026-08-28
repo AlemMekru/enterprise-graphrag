@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 
 from app import __version__
+from app.api.routes.retrieval import router as retrieval_router
 from app.models.health import HealthResponse
 
 app = FastAPI(
@@ -10,6 +11,7 @@ app = FastAPI(
     description="Production-oriented GraphRAG API for enterprise knowledge.",
     version=__version__,
 )
+app.include_router(retrieval_router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Operations"])
