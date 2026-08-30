@@ -8,8 +8,25 @@ from neo4j import GraphDatabase
 from app.config import Settings, get_settings
 from app.embeddings.exceptions import EmbeddingConfigurationError
 from app.embeddings.factory import create_embedding_provider
+from app.extraction.exceptions import ExtractionConfigurationError
+from app.extraction.factory import create_graph_extraction_provider
+from app.extraction.service import GraphExtractionService
 from app.graph.vector_store import Neo4jVectorStore, VectorIndexConfig
 from app.retrieval.vector import VectorRetriever
+
+
+def get_graph_extraction_service(
+    settings: Settings = Depends(get_settings),
+) -> GraphExtractionService:
+    """Build the configured structured graph extraction service."""
+    try:
+        provider = create_graph_extraction_provider(settings)
+    except ExtractionConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    return GraphExtractionService(provider)
 
 
 def get_vector_retriever(
