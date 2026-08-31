@@ -12,7 +12,35 @@ from app.extraction.exceptions import ExtractionConfigurationError
 from app.extraction.factory import create_graph_extraction_provider
 from app.extraction.service import GraphExtractionService
 from app.graph.vector_store import Neo4jVectorStore, VectorIndexConfig
+from app.graph.construction import GraphConstructionService
+from app.graph.knowledge_store import Neo4jKnowledgeGraphStore
 from app.retrieval.vector import VectorRetriever
+
+
+def get_knowledge_graph_store(
+    settings: Settings = Depends(get_settings),
+) -> Iterator[Neo4jKnowledgeGraphStore]:
+    """Build a request-scoped Neo4j knowledge-graph store."""
+    if settings.neo4j_password is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="NEO4J_PASSWORD is required for knowledge-graph operations",
+        )
+    driver = GraphDatabase.driver(
+        settings.neo4j_uri,
+        auth=(settings.neo4j_user, settings.neo4j_password.get_secret_value()),
+    )
+    try:
+        yield Neo4jKnowledgeGraphStore(driver, settings.neo4j_database)
+    finally:
+        driver.close()
+
+
+def get_graph_construction_service(
+    store: Neo4jKnowledgeGraphStore = Depends(get_knowledge_graph_store),
+) -> GraphConstructionService:
+    """Compose graph construction around the request-scoped store."""
+    return GraphConstructionService(store)
 
 
 def get_graph_extraction_service(

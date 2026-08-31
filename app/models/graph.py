@@ -100,3 +100,49 @@ class GraphExtractionRequest(BaseModel):
     chunk_id: str | None = Field(default=None, min_length=1)
     chunk_index: int = Field(default=0, ge=0)
     source_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphEntity(BaseModel):
+    """Entity representation returned by graph queries."""
+
+    entity_id: str
+    name: str
+    normalized_name: str
+    entity_type: EntityType
+    description: str | None = None
+
+
+class RelationshipEvidence(BaseModel):
+    """One source record supporting a persisted semantic edge."""
+
+    evidence_id: str
+    description: str | None = None
+    evidence: str | None = None
+    provenance: GraphProvenance
+
+
+class GraphConnection(BaseModel):
+    """Directed semantic edge and its accumulated evidence."""
+
+    source_entity: GraphEntity
+    target_entity: GraphEntity
+    relationship_type: str
+    description: str | None = None
+    evidence: list[RelationshipEvidence] = Field(default_factory=list)
+
+
+class EntityNeighborhood(BaseModel):
+    """One entity and directly connected semantic neighbors."""
+
+    entity: GraphEntity
+    connections: list[GraphConnection] = Field(default_factory=list)
+
+
+class GraphPersistenceResponse(BaseModel):
+    """Counts from one idempotent extraction persistence operation."""
+
+    document_id: str
+    chunk_id: str
+    entity_count: int = Field(ge=0)
+    mention_count: int = Field(ge=0)
+    relationship_count: int = Field(ge=0)

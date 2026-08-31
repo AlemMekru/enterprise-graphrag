@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app import __version__
 from app.api.routes.extraction import router as extraction_router
+from app.api.routes.graph import router as graph_router
 from app.api.routes.retrieval import router as retrieval_router
 from app.models.health import HealthResponse
 
@@ -13,6 +14,7 @@ app = FastAPI(
     version=__version__,
 )
 app.include_router(extraction_router)
+app.include_router(graph_router)
 app.include_router(retrieval_router)
 
 

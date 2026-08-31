@@ -12,14 +12,11 @@ from neo4j import Driver, Transaction
 from neo4j.exceptions import Neo4jError
 
 from app.graph.exceptions import VectorIndexConfigurationError, VectorStoreError
+from app.graph.schema import CHUNK_CONSTRAINT_CYPHER, DOCUMENT_CONSTRAINT_CYPHER
 from app.models.document import Document
 from app.models.vector import EmbeddedChunk, VectorRetrievalResult
 
 logger = logging.getLogger(__name__)
-
-DOCUMENT_CONSTRAINT = "document_id_unique"
-CHUNK_CONSTRAINT = "chunk_id_unique"
-
 
 @dataclass(frozen=True)
 class VectorIndexConfig:
@@ -55,14 +52,8 @@ class Neo4jVectorStore:
         """Create uniqueness constraints and a compatible vector index."""
         try:
             with self.driver.session(database=self.database) as session:
-                session.run(
-                    f"CREATE CONSTRAINT {DOCUMENT_CONSTRAINT} IF NOT EXISTS "
-                    "FOR (document:Document) REQUIRE document.document_id IS UNIQUE"
-                ).consume()
-                session.run(
-                    f"CREATE CONSTRAINT {CHUNK_CONSTRAINT} IF NOT EXISTS "
-                    "FOR (chunk:Chunk) REQUIRE chunk.chunk_id IS UNIQUE"
-                ).consume()
+                session.run(DOCUMENT_CONSTRAINT_CYPHER).consume()
+                session.run(CHUNK_CONSTRAINT_CYPHER).consume()
                 self._ensure_vector_index(session)
         except Neo4jError as exc:
             raise VectorStoreError("Unable to initialize Neo4j vector schema") from exc

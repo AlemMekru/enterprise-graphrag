@@ -54,6 +54,15 @@ def test_entity_ids_are_stable() -> None:
     assert first.startswith("entity_")
 
 
+def test_entity_identity_is_stable_across_chunks_and_documents() -> None:
+    normalized_name = normalize_entity_name("Identity Access System")
+
+    from_chunk_a = deterministic_entity_id(EntityType.SYSTEM, normalized_name)
+    from_chunk_b = deterministic_entity_id(EntityType.SYSTEM, normalized_name)
+
+    assert from_chunk_a == from_chunk_b
+
+
 def test_relationship_ids_are_stable_per_source_chunk() -> None:
     first = deterministic_relationship_id(
         "entity_source", "MANAGES", "entity_target", "chunk_1"

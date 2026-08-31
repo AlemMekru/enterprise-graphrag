@@ -10,7 +10,7 @@ GraphRAG extends retrieval-augmented generation (RAG) with a knowledge graph. Tr
 
 Enterprise knowledge is fragmented across policies, reports, contracts, and internal documentation. Pure vector search can find similar passages but may miss relationships between people, systems, business units, and events. Enterprise GraphRAG is designed to ingest that content, represent its structure in Neo4j, retrieve relevant graph and vector context, and produce grounded answers with source citations.
 
-Phases 1 through 3 are implemented: the project loads text, Markdown, and PDF documents, creates deterministic provenance-preserving chunks, generates OpenAI-compatible embeddings, stores vectors in Neo4j, performs semantic retrieval, and extracts validated entity and relationship candidates. Knowledge-graph persistence, hybrid retrieval, and answer generation remain intentionally out of scope.
+Phases 1 through 4 are implemented: the project loads text, Markdown, and PDF documents, creates deterministic provenance-preserving chunks, generates OpenAI-compatible embeddings, performs semantic retrieval, extracts validated graph candidates, and constructs a queryable Neo4j knowledge graph. Hybrid retrieval and answer generation remain intentionally out of scope.
 
 ## Architecture
 
@@ -22,7 +22,7 @@ flowchart LR
     D --> E[(Neo4j vector index)]
     C --> F[Entity and relationship extraction]
     F --> G[Validated graph candidates]
-    G -. Phase 4 .-> H[(Future Neo4j knowledge graph)]
+    G --> H[(Neo4j knowledge graph)]
     E -. Phase 5 .-> I[Future hybrid GraphRAG retrieval]
     H -. Phase 5 .-> I
     I -. Phase 6 .-> J[Future grounded answer generation]
@@ -34,7 +34,7 @@ The codebase is organized by responsibility:
 - `app/embeddings`: provider-neutral OpenAI and Azure OpenAI embedding support
 - `app/extraction`: structured LLM extraction, normalization, and validation
 - `app/indexing`: embedding and Neo4j vector-index orchestration
-- `app/graph`: Neo4j persistence and vector-index management
+- `app/graph`: Neo4j vector storage, knowledge-graph construction, and graph queries
 - `app/retrieval`: graph, vector, and hybrid retrieval strategies
 - `app/generation`: provider-neutral LLM orchestration and grounded responses
 - `app/models`: API and domain models
@@ -56,7 +56,7 @@ The codebase is organized by responsibility:
 - [x] Idempotent chunk persistence and vector indexing in Neo4j
 - [x] Semantic vector retrieval API
 - [x] Structured, provenance-aware entity and relationship extraction
-- Idempotent knowledge-graph construction in Neo4j
+- [x] Idempotent knowledge-graph construction and neighborhood queries in Neo4j
 - Hybrid semantic and graph-aware retrieval
 - Grounded answer generation with source citations
 - Evaluation, observability, resilience, and expanded automated tests
@@ -267,7 +267,61 @@ service = GraphExtractionService(create_graph_extraction_provider(settings))
 results = service.extract_chunks(chunks)
 ```
 
-The likely concepts in the sample include policies, business functions, systems, processes, and their source-supported relationships. Actual results come from the configured model and are never hard-coded into production code. Phase 4 will be responsible for persisting these candidates into the Neo4j knowledge graph.
+The likely concepts in the sample include policies, business functions, systems, processes, and their source-supported relationships. Actual results come from the configured model and are never hard-coded into production code. Phase 4 persists these candidates into the Neo4j knowledge graph as described below.
+
+## Neo4j knowledge-graph construction
+
+Phase 4 persists the validated Phase 3 candidates as a real knowledge graph while reusing the `Document` and `Chunk` nodes created by the Phase 2 vector branch.
+
+```mermaid
+graph LR
+    D[Document] -->|HAS_CHUNK| C[Chunk]
+    C -->|MENTIONS| E1[Entity]
+    C -->|MENTIONS| E2[Entity]
+    E1 -->|"Semantic relationship<br/>e.g. MANAGES"| E2
+```
+
+### Graph schema and identity
+
+- `Document.document_id`, `Chunk.chunk_id`, and `Entity.entity_id` have idempotent uniqueness constraints.
+- Entities use a single `:Entity` label with `name`, `normalized_name`, `entity_type`, and an optional description.
+- Entity identity is the SHA-256 hash of the controlled entity type and exact normalized name. It never includes document, chunk, extraction order, or provenance, so the same normalized entity from different documents resolves to the same node.
+- This phase intentionally performs no fuzzy or semantic entity resolution.
+
+### Provenance and evidence
+
+Every source chunk creates one idempotent `(:Chunk)-[:MENTIONS]->(:Entity)` edge carrying the document ID, chunk ID and index, source path, and serialized source metadata. Provenance is not stored as a mutable singleton property on the Entity node.
+
+Semantic relationships are merged by directed source entity, validated relationship type, and target entity. One semantic edge can therefore accumulate support from multiple chunks. Its `evidence_ids` and `evidence_records` arrays append each deterministic Phase 3 relationship evidence record only once, retaining descriptions, textual evidence, and complete source provenance for later citations.
+
+All entities, mentions, and semantic relationships for one extraction are written in a single Neo4j transaction. Persistence first verifies that the referenced Phase 2 `Document-[:HAS_CHUNK]->Chunk` path exists; missing chunks abort the transaction rather than creating duplicate document or chunk nodes.
+
+### Graph persistence API
+
+Persist an already validated Phase 3 `ExtractionResult`:
+
+```text
+POST /graph/extractions
+```
+
+The endpoint accepts only the typed extraction schema. It never accepts Cypher. Relationship types must already be canonical `UPPER_SNAKE_CASE`; property values and IDs are sent as parameters, and only strictly validated relationship labels are interpolated into Cypher.
+
+### Entity neighborhood API
+
+Retrieve directly connected semantic entities and all supporting evidence:
+
+```text
+GET /graph/entities/{entity_id}/neighbors
+```
+
+The response preserves edge direction and contains the source entity, target entity, normalized relationship type, descriptions, evidence text, and document/chunk provenance. It is a focused graph query only—Phase 5 hybrid vector-plus-graph retrieval has not been implemented.
+
+The complete graph-side sample workflow is:
+
+```text
+sample policy → chunks → structured extraction → validated candidates
+              → Neo4j entities, mentions, semantic edges, and evidence
+```
 
 ## API
 
@@ -276,6 +330,8 @@ The likely concepts in the sample include policies, business functions, systems,
 | `GET` | `/health` | Confirms that the API process is healthy |
 | `POST` | `/retrieve/vector` | Returns semantically similar chunks from the Neo4j vector index |
 | `POST` | `/extract/graph` | Extracts validated entities and relationships without persistence |
+| `POST` | `/graph/extractions` | Persists one validated extraction transactionally |
+| `GET` | `/graph/entities/{entity_id}/neighbors` | Returns direct semantic neighbors and supporting provenance |
 
 ## Security
 
@@ -289,11 +345,11 @@ This project is being developed incrementally, with each phase building on the p
 - [x] **Phase 1 — Document ingestion and chunking:** TXT, Markdown, and PDF ingestion; deterministic overlapping chunks; source metadata preservation; and unit test coverage
 - [x] **Phase 2 — Embeddings and vector indexing:** provider-neutral embeddings, idempotent Neo4j chunk storage, vector-index management, and semantic retrieval
 - [x] **Phase 3 — Entity and relationship extraction:** structured LLM output, deterministic normalization, validation, deduplication, and source provenance
-- [ ] **Phase 4 — Neo4j knowledge-graph construction**
+- [x] **Phase 4 — Neo4j knowledge-graph construction:** transactional entity, mention, semantic-edge, and evidence persistence with neighborhood queries
 - [ ] **Phase 5 — Hybrid GraphRAG retrieval**
 - [ ] **Phase 6 — Grounded answer generation and source citations**
 
-Current milestone: **Phase 3 complete.**
+Current milestone: **Phase 4 complete.**
 
 ## Author
 
