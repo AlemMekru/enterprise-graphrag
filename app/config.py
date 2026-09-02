@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     neo4j_vector_index_name: str = "chunk_embedding_index"
     vector_similarity_function: Literal["cosine", "euclidean"] = "cosine"
     retrieval_top_k: int = 5
+    hybrid_default_top_k: int = 5
+    hybrid_vector_weight: float = 0.7
+    hybrid_graph_weight: float = 0.3
+    graph_max_hops: int = 2
+    graph_max_entities: int = 50
+    graph_max_relationships: int = 100
+    graph_max_supporting_chunks: int = 20
 
     llm_provider: Literal["openai", "azure_openai"] = "openai"
     embedding_provider: Literal["openai", "azure_openai"] = "openai"
@@ -58,6 +65,22 @@ class Settings(BaseSettings):
             raise ValueError("EMBEDDING_DIMENSION must be between 1 and 4096")
         if not 1 <= self.retrieval_top_k <= 100:
             raise ValueError("RETRIEVAL_TOP_K must be between 1 and 100")
+        if not 1 <= self.hybrid_default_top_k <= 100:
+            raise ValueError("HYBRID_DEFAULT_TOP_K must be between 1 and 100")
+        if self.hybrid_vector_weight < 0 or self.hybrid_graph_weight < 0:
+            raise ValueError("Hybrid retrieval weights cannot be negative")
+        if self.hybrid_vector_weight + self.hybrid_graph_weight <= 0:
+            raise ValueError("At least one hybrid retrieval weight must be positive")
+        if not 1 <= self.graph_max_hops <= 2:
+            raise ValueError("GRAPH_MAX_HOPS must be 1 or 2")
+        if not 1 <= self.graph_max_entities <= 500:
+            raise ValueError("GRAPH_MAX_ENTITIES must be between 1 and 500")
+        if not 1 <= self.graph_max_relationships <= 1_000:
+            raise ValueError("GRAPH_MAX_RELATIONSHIPS must be between 1 and 1000")
+        if not 1 <= self.graph_max_supporting_chunks <= 200:
+            raise ValueError(
+                "GRAPH_MAX_SUPPORTING_CHUNKS must be between 1 and 200"
+            )
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.neo4j_vector_index_name):
             raise ValueError(
                 "NEO4J_VECTOR_INDEX_NAME must contain only letters, numbers, and "

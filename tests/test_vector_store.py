@@ -130,6 +130,8 @@ def test_vector_search_returns_structured_results_and_metadata() -> None:
             "document_id": "doc_1",
             "text": "Records are retained for seven years.",
             "score": 0.92,
+            "chunk_index": 2,
+            "source": "/data/policy.md",
             "source_metadata_json": '{"filename":"policy.md","page":2}',
         }
     ]
@@ -138,6 +140,8 @@ def test_vector_search_returns_structured_results_and_metadata() -> None:
 
     assert results[0].score == 0.92
     assert results[0].source_metadata == {"filename": "policy.md", "page": 2}
+    assert results[0].chunk_index == 2
+    assert results[0].source == "/data/policy.md"
     assert session.run.call_args.kwargs["top_k"] == 4
     assert session.run.call_args.kwargs["index_name"] == "chunk_embedding_index"
 

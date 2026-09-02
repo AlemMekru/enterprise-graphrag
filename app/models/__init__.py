@@ -10,6 +10,7 @@ from app.models.graph import (
     Relationship,
 )
 from app.models.vector import EmbeddedChunk, VectorRetrievalResult
+from app.models.hybrid import HybridContextChunk, HybridRetrievalResult
 
 __all__ = [
     "Document",
@@ -20,6 +21,8 @@ __all__ = [
     "EntityType",
     "ExtractionResult",
     "GraphConnection",
+    "HybridContextChunk",
+    "HybridRetrievalResult",
     "Relationship",
     "VectorRetrievalResult",
 ]

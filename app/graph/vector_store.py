@@ -124,6 +124,8 @@ class Neo4jVectorStore:
         RETURN chunk.chunk_id AS chunk_id,
                document.document_id AS document_id,
                chunk.text AS text,
+               chunk.chunk_index AS chunk_index,
+               document.source AS source,
                score,
                chunk.source_metadata_json AS source_metadata_json
         ORDER BY score DESC
@@ -231,5 +233,7 @@ class Neo4jVectorStore:
             document_id=record["document_id"],
             text=record["text"],
             score=record["score"],
+            chunk_index=record["chunk_index"],
+            source=record["source"],
             source_metadata=metadata,
         )

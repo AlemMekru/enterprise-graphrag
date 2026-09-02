@@ -1,5 +1,6 @@
-"""Vector and future hybrid retrieval components."""
+"""Vector and hybrid retrieval components."""
 
+from app.retrieval.hybrid import HybridGraphRetriever, HybridRetrievalConfig
 from app.retrieval.vector import VectorRetriever
 
-__all__ = ["VectorRetriever"]
+__all__ = ["HybridGraphRetriever", "HybridRetrievalConfig", "VectorRetriever"]

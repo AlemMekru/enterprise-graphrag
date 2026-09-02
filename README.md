@@ -10,22 +10,21 @@ GraphRAG extends retrieval-augmented generation (RAG) with a knowledge graph. Tr
 
 Enterprise knowledge is fragmented across policies, reports, contracts, and internal documentation. Pure vector search can find similar passages but may miss relationships between people, systems, business units, and events. Enterprise GraphRAG is designed to ingest that content, represent its structure in Neo4j, retrieve relevant graph and vector context, and produce grounded answers with source citations.
 
-Phases 1 through 4 are implemented: the project loads text, Markdown, and PDF documents, creates deterministic provenance-preserving chunks, generates OpenAI-compatible embeddings, performs semantic retrieval, extracts validated graph candidates, and constructs a queryable Neo4j knowledge graph. Hybrid retrieval and answer generation remain intentionally out of scope.
+Phases 1 through 5 are implemented: the project loads text, Markdown, and PDF documents, creates deterministic provenance-preserving chunks, generates OpenAI-compatible embeddings, performs semantic retrieval, extracts validated graph candidates, constructs a queryable Neo4j knowledge graph, and fuses vector seeds with bounded graph expansion. Grounded answer generation remains intentionally out of scope.
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A[Enterprise documents] --> B[Document ingestion]
-    B --> C[Chunking]
-    C --> D[Embeddings]
-    D --> E[(Neo4j vector index)]
-    C --> F[Entity and relationship extraction]
-    F --> G[Validated graph candidates]
-    G --> H[(Neo4j knowledge graph)]
-    E -. Phase 5 .-> I[Future hybrid GraphRAG retrieval]
-    H -. Phase 5 .-> I
-    I -. Phase 6 .-> J[Future grounded answer generation]
+flowchart TD
+    A[Enterprise documents] --> B[Document ingestion and chunking]
+    B --> C[Embeddings]
+    C --> D[(Neo4j vector index)]
+    B --> E[Entity and relationship extraction]
+    E --> F[(Neo4j knowledge graph)]
+    D --> G[Hybrid GraphRAG retrieval]
+    F --> G
+    G --> H[Structured, ranked context]
+    H -. Phase 6 .-> I[Future grounded answer generation and citations]
 ```
 
 The codebase is organized by responsibility:
@@ -35,7 +34,7 @@ The codebase is organized by responsibility:
 - `app/extraction`: structured LLM extraction, normalization, and validation
 - `app/indexing`: embedding and Neo4j vector-index orchestration
 - `app/graph`: Neo4j vector storage, knowledge-graph construction, and graph queries
-- `app/retrieval`: graph, vector, and hybrid retrieval strategies
+- `app/retrieval`: semantic retrieval and hybrid vector/graph orchestration
 - `app/generation`: provider-neutral LLM orchestration and grounded responses
 - `app/models`: API and domain models
 
@@ -57,7 +56,7 @@ The codebase is organized by responsibility:
 - [x] Semantic vector retrieval API
 - [x] Structured, provenance-aware entity and relationship extraction
 - [x] Idempotent knowledge-graph construction and neighborhood queries in Neo4j
-- Hybrid semantic and graph-aware retrieval
+- [x] Bounded, explainable hybrid semantic and graph-aware retrieval
 - Grounded answer generation with source citations
 - Evaluation, observability, resilience, and expanded automated tests
 
@@ -213,7 +212,7 @@ curl -X POST http://localhost:8000/retrieve/vector \
   -d '{"query":"What is the organization data retention policy?","top_k":5}'
 ```
 
-The response contains scored chunks with `chunk_id`, `document_id`, text, similarity score, and source metadata. No production retrieval results are mocked or synthesized.
+The response contains scored chunks with `chunk_id`, `document_id`, chunk index, source path, text, similarity score, and source metadata. No production retrieval results are mocked or synthesized.
 
 ## Entity and relationship extraction
 
@@ -314,7 +313,7 @@ Retrieve directly connected semantic entities and all supporting evidence:
 GET /graph/entities/{entity_id}/neighbors
 ```
 
-The response preserves edge direction and contains the source entity, target entity, normalized relationship type, descriptions, evidence text, and document/chunk provenance. It is a focused graph query only—Phase 5 hybrid vector-plus-graph retrieval has not been implemented.
+The response preserves edge direction and contains the source entity, target entity, normalized relationship type, descriptions, evidence text, and document/chunk provenance. It remains useful for inspecting one entity independently of hybrid retrieval.
 
 The complete graph-side sample workflow is:
 
@@ -323,12 +322,56 @@ sample policy → chunks → structured extraction → validated candidates
               → Neo4j entities, mentions, semantic edges, and evidence
 ```
 
+## Hybrid GraphRAG retrieval
+
+Phase 5 ends at retrieved context; it does not invoke an answer-generation LLM. `HybridGraphRetriever` reuses the Phase 2 `VectorRetriever` to embed a query and select vector seed chunks. A bounded Neo4j expansion then finds entities mentioned by those chunks, follows one or two semantic relationship hops, loads edge evidence, and retrieves supporting chunks associated with the reached entities.
+
+Traversal is deliberately constrained. Hop depth is restricted to 1 or 2, paths cannot repeat a node, and entity, relationship, and supporting-chunk counts have global configurable caps. Chunk and entity IDs are parameterized in Cypher; only the already validated integer hop depth affects query structure. Graph access uses three batch queries—seed entities, semantic paths, and supporting chunks—rather than an N+1 query per entity.
+
+### Fusion, deduplication, and explanations
+
+Vector similarity and graph evidence remain independent signals. Neo4j similarity is clamped to `[0, 1]`; graph relevance starts with `1 / (distance + 1)` and receives small capped boosts for multiple relevant entities and relationship evidence. The final score is:
+
+```text
+final_score = normalized_vector_weight × vector_score
+            + normalized_graph_weight  × graph_score
+```
+
+Default weights are `0.7` vector and `0.3` graph. Stable chunk IDs, entity IDs, semantic relationship IDs, and evidence IDs drive deduplication. If a chunk arrives through several paths, the response retains it once, merges its strongest graph distance and supporting IDs, and labels its retrieval reasons with one or more of `VECTOR`, `GRAPH_ENTITY`, `GRAPH_RELATIONSHIP`, and `RELATIONSHIP_EVIDENCE`. Ranking is deterministic: final score descending, then chunk ID.
+
+Every context chunk retains its document ID, chunk ID and index, source path, and metadata. Semantic edges retain their full Phase 4 evidence records. This structure is intended to support grounded citations in Phase 6 without prematurely concatenating context into an opaque text blob.
+
+If vector retrieval succeeds but no entities or relationships exist, the endpoint returns valid vector-only context and sets `graph_evidence_found` to `false`. Embedding, vector-index, and Neo4j failures remain explicit service errors rather than being mistaken for empty graph evidence.
+
+### Configuration
+
+```dotenv
+HYBRID_DEFAULT_TOP_K=5
+HYBRID_VECTOR_WEIGHT=0.7
+HYBRID_GRAPH_WEIGHT=0.3
+GRAPH_MAX_HOPS=2
+GRAPH_MAX_ENTITIES=50
+GRAPH_MAX_RELATIONSHIPS=100
+GRAPH_MAX_SUPPORTING_CHUNKS=20
+```
+
+### Retrieve hybrid context
+
+```bash
+curl -X POST http://localhost:8000/retrieve/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Which systems are governed by the information security policy?","top_k":5,"graph_hops":1}'
+```
+
+The existing `/retrieve/vector` endpoint makes a direct vector-only comparison possible. For example, a vector seed might mention an information security policy but not the identity system it governs; graph expansion can follow the persisted `GOVERNS` edge to retrieve a separate supporting chunk about that system. Whether this adds useful context depends on the corpus and graph quality—this project makes no universal performance claim.
+
 ## API
 
 | Method | Endpoint | Description |
 | --- | --- | --- |
 | `GET` | `/health` | Confirms that the API process is healthy |
 | `POST` | `/retrieve/vector` | Returns semantically similar chunks from the Neo4j vector index |
+| `POST` | `/retrieve/hybrid` | Returns fused, explainable vector and graph context without answer generation |
 | `POST` | `/extract/graph` | Extracts validated entities and relationships without persistence |
 | `POST` | `/graph/extractions` | Persists one validated extraction transactionally |
 | `GET` | `/graph/entities/{entity_id}/neighbors` | Returns direct semantic neighbors and supporting provenance |
@@ -346,10 +389,10 @@ This project is being developed incrementally, with each phase building on the p
 - [x] **Phase 2 — Embeddings and vector indexing:** provider-neutral embeddings, idempotent Neo4j chunk storage, vector-index management, and semantic retrieval
 - [x] **Phase 3 — Entity and relationship extraction:** structured LLM output, deterministic normalization, validation, deduplication, and source provenance
 - [x] **Phase 4 — Neo4j knowledge-graph construction:** transactional entity, mention, semantic-edge, and evidence persistence with neighborhood queries
-- [ ] **Phase 5 — Hybrid GraphRAG retrieval**
+- [x] **Phase 5 — Hybrid GraphRAG retrieval:** bounded multi-hop expansion, evidence-aware fusion, deterministic ranking, deduplication, and provenance-preserving context
 - [ ] **Phase 6 — Grounded answer generation and source citations**
 
-Current milestone: **Phase 4 complete.**
+Current milestone: **Phase 5 complete.**
 
 ## Author
 

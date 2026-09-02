@@ -27,6 +27,8 @@ class VectorRetrievalResult(BaseModel):
     document_id: str
     text: str
     score: float
+    chunk_index: int = Field(default=0, ge=0)
+    source: str | None = None
     source_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

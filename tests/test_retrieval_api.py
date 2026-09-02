@@ -58,6 +58,8 @@ def test_vector_retrieval_response_is_structured(
                 "document_id": "doc_1",
                 "text": "Records are retained for seven years.",
                 "score": 0.91,
+                "chunk_index": 0,
+                "source": None,
                 "source_metadata": {
                     "filename": "information-security-policy.md"
                 },

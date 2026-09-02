@@ -38,6 +38,13 @@ from app.models.graph import (
     GraphPersistenceResponse,
     RelationshipEvidence,
 )
+from app.models.hybrid import (
+    GraphExpandedEntity,
+    GraphExpandedRelationship,
+    GraphExpansionResult,
+    GraphSupportingChunk,
+    RetrievalSource,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +139,37 @@ class Neo4jKnowledgeGraphStore:
         except Neo4jError as exc:
             raise KnowledgeGraphStoreError(
                 "Unable to query entity neighborhood from Neo4j"
+            ) from exc
+
+    def expand_seed_chunks(
+        self,
+        seed_chunk_ids: Sequence[str],
+        hops: int,
+        max_entities: int,
+        max_relationships: int,
+        max_supporting_chunks: int,
+    ) -> GraphExpansionResult:
+        """Expand vector seed chunks through a strictly bounded entity graph."""
+        if hops not in (1, 2):
+            raise KnowledgeGraphInputError("Graph expansion hops must be 1 or 2")
+        if not seed_chunk_ids:
+            return GraphExpansionResult()
+        if min(max_entities, max_relationships, max_supporting_chunks) <= 0:
+            raise KnowledgeGraphInputError("Graph expansion bounds must be positive")
+        unique_chunk_ids = list(dict.fromkeys(seed_chunk_ids))
+        try:
+            with self.driver.session(database=self.database) as session:
+                return session.execute_read(
+                    self._read_hybrid_expansion,
+                    unique_chunk_ids,
+                    hops,
+                    max_entities,
+                    max_relationships,
+                    max_supporting_chunks,
+                )
+        except Neo4jError as exc:
+            raise KnowledgeGraphStoreError(
+                "Unable to expand hybrid retrieval context from Neo4j"
             ) from exc
 
     @staticmethod
@@ -230,6 +268,212 @@ class Neo4jKnowledgeGraphStore:
             for record in records
         ]
         return EntityNeighborhood(entity=entity, connections=connections)
+
+    @staticmethod
+    def _read_hybrid_expansion(
+        transaction: Transaction,
+        seed_chunk_ids: list[str],
+        hops: int,
+        max_entities: int,
+        max_relationships: int,
+        max_supporting_chunks: int,
+    ) -> GraphExpansionResult:
+        seed_records = transaction.run(
+            """
+            MATCH (chunk:Chunk)-[:MENTIONS]->(entity:Entity)
+            WHERE chunk.chunk_id IN $seed_chunk_ids
+            RETURN entity.entity_id AS entity_id,
+                   entity.name AS name,
+                   entity.normalized_name AS normalized_name,
+                   entity.entity_type AS entity_type,
+                   entity.description AS description,
+                   collect(DISTINCT chunk.chunk_id) AS seed_chunk_ids
+            ORDER BY entity_id
+            LIMIT $max_entities
+            """,
+            seed_chunk_ids=seed_chunk_ids,
+            max_entities=max_entities,
+        )
+        entities: dict[str, GraphExpandedEntity] = {}
+        for record in seed_records:
+            graph_entity = Neo4jKnowledgeGraphStore._record_to_entity(record)
+            entities[graph_entity.entity_id] = GraphExpandedEntity(
+                entity=graph_entity,
+                graph_distance=0,
+                seed_chunk_ids=sorted(record["seed_chunk_ids"]),
+            )
+        if not entities:
+            return GraphExpansionResult()
+
+        # The only interpolated value is the integer validated above as exactly 1 or 2.
+        path_query = f"""
+            MATCH (seed:Entity)
+            WHERE seed.entity_id IN $seed_entity_ids
+            MATCH path = (seed)-[*1..{hops}]-(related:Entity)
+            WHERE all(edge IN relationships(path) WHERE type(edge) <> 'MENTIONS')
+              AND all(node IN nodes(path)
+                      WHERE single(other IN nodes(path) WHERE other = node))
+            WITH seed, path, relationships(path) AS semantic
+            ORDER BY length(path), related.entity_id
+            LIMIT $max_relationships
+            UNWIND range(0, size(semantic) - 1) AS edge_index
+            WITH seed, path, semantic[edge_index] AS edge, edge_index
+            RETURN startNode(edge).entity_id AS source_entity_id,
+                   startNode(edge).name AS source_name,
+                   startNode(edge).normalized_name AS source_normalized_name,
+                   startNode(edge).entity_type AS source_entity_type,
+                   startNode(edge).description AS source_description,
+                   endNode(edge).entity_id AS target_entity_id,
+                   endNode(edge).name AS target_name,
+                   endNode(edge).normalized_name AS target_normalized_name,
+                   endNode(edge).entity_type AS target_entity_type,
+                   endNode(edge).description AS target_description,
+                   edge.semantic_key AS relationship_id,
+                   type(edge) AS relationship_type,
+                   edge.description AS relationship_description,
+                   coalesce(edge.evidence_records, []) AS evidence_records,
+                   edge_index + 1 AS graph_distance,
+                   seed.entity_id AS seed_entity_id
+            ORDER BY graph_distance, relationship_type, source_entity_id,
+                     target_entity_id, relationship_id
+            """
+        path_records = transaction.run(
+            path_query,
+            seed_entity_ids=sorted(entities),
+            max_relationships=max_relationships,
+        )
+        relationships: dict[str, GraphExpandedRelationship] = {}
+        for record in path_records:
+            distance = min(int(record["graph_distance"]), hops)
+            for prefix in ("source_", "target_"):
+                graph_entity = Neo4jKnowledgeGraphStore._record_to_entity(record, prefix)
+                existing = entities.get(graph_entity.entity_id)
+                candidate_distance = (
+                    0 if graph_entity.entity_id in entities and existing.graph_distance == 0
+                    else distance
+                )
+                if existing is None and len(entities) < max_entities:
+                    entities[graph_entity.entity_id] = GraphExpandedEntity(
+                        entity=graph_entity,
+                        graph_distance=candidate_distance,
+                        seed_chunk_ids=[],
+                    )
+                elif existing is not None and distance < existing.graph_distance:
+                    existing.graph_distance = distance
+
+            relationship_id = record["relationship_id"] or _semantic_key(
+                record["source_entity_id"],
+                record["relationship_type"],
+                record["target_entity_id"],
+            )
+            evidence = Neo4jKnowledgeGraphStore._parse_evidence_records(
+                record["evidence_records"]
+            )
+            candidate = GraphExpandedRelationship(
+                relationship_id=relationship_id,
+                source_entity_id=record["source_entity_id"],
+                target_entity_id=record["target_entity_id"],
+                relationship_type=record["relationship_type"],
+                description=record["relationship_description"],
+                graph_distance=distance,
+                evidence=evidence,
+            )
+            if (
+                candidate.source_entity_id not in entities
+                or candidate.target_entity_id not in entities
+            ):
+                continue
+            existing_relationship = relationships.get(relationship_id)
+            if existing_relationship is None:
+                relationships[relationship_id] = candidate
+            else:
+                existing_relationship.graph_distance = min(
+                    existing_relationship.graph_distance, distance
+                )
+                known_evidence = {
+                    item.evidence_id for item in existing_relationship.evidence
+                }
+                existing_relationship.evidence.extend(
+                    item for item in evidence if item.evidence_id not in known_evidence
+                )
+
+        entity_ids = sorted(entities)[:max_entities]
+        supporting_records = transaction.run(
+            """
+            MATCH (document:Document)-[:HAS_CHUNK]->(chunk:Chunk)
+                  -[:MENTIONS]->(entity:Entity)
+            WHERE entity.entity_id IN $entity_ids
+            WITH document, chunk,
+                 collect(DISTINCT entity.entity_id) AS entity_ids
+            RETURN chunk.chunk_id AS chunk_id,
+                   document.document_id AS document_id,
+                   chunk.text AS text,
+                   chunk.chunk_index AS chunk_index,
+                   document.source AS source,
+                   chunk.source_metadata_json AS source_metadata_json,
+                   entity_ids
+            ORDER BY chunk.chunk_id
+            LIMIT $max_supporting_chunks
+            """,
+            entity_ids=entity_ids,
+            max_supporting_chunks=max_supporting_chunks,
+        )
+        evidence_by_chunk: dict[str, set[str]] = {}
+        for relationship in relationships.values():
+            for evidence in relationship.evidence:
+                evidence_by_chunk.setdefault(evidence.provenance.chunk_id, set()).add(
+                    relationship.relationship_id
+                )
+
+        supporting_chunks: list[GraphSupportingChunk] = []
+        for record in supporting_records:
+            related_entity_ids = sorted(record["entity_ids"])
+            entity_distances = [
+                entities[entity_id].graph_distance
+                for entity_id in related_entity_ids
+                if entity_id in entities
+            ]
+            relationship_ids = sorted(evidence_by_chunk.get(record["chunk_id"], set()))
+            sources = [RetrievalSource.GRAPH_ENTITY]
+            if relationship_ids:
+                sources.extend(
+                    [
+                        RetrievalSource.GRAPH_RELATIONSHIP,
+                        RetrievalSource.RELATIONSHIP_EVIDENCE,
+                    ]
+                )
+            supporting_chunks.append(
+                GraphSupportingChunk(
+                    chunk_id=record["chunk_id"],
+                    document_id=record["document_id"],
+                    text=record["text"],
+                    chunk_index=record["chunk_index"],
+                    source=record["source"],
+                    source_metadata=_load_json_metadata(
+                        record["source_metadata_json"]
+                    ),
+                    graph_distance=min(entity_distances, default=0),
+                    entity_ids=related_entity_ids,
+                    relationship_ids=relationship_ids,
+                    retrieval_sources=sources,
+                )
+            )
+
+        return GraphExpansionResult(
+            entities=sorted(
+                entities.values(),
+                key=lambda item: (item.graph_distance, item.entity.entity_id),
+            )[:max_entities],
+            relationships=sorted(
+                relationships.values(),
+                key=lambda item: (
+                    item.graph_distance,
+                    item.relationship_type,
+                    item.relationship_id,
+                ),
+            )[:max_relationships],
+            supporting_chunks=supporting_chunks,
+        )
 
     @staticmethod
     def _validate_result(result: ExtractionResult) -> None:
@@ -369,14 +613,9 @@ class Neo4jKnowledgeGraphStore:
 
     @staticmethod
     def _record_to_connection(record: Any) -> GraphConnection:
-        evidence: list[RelationshipEvidence] = []
-        for raw_record in record["evidence_records"] or []:
-            try:
-                evidence.append(RelationshipEvidence.model_validate_json(raw_record))
-            except (ValueError, TypeError) as exc:
-                raise KnowledgeGraphStoreError(
-                    "Stored relationship evidence is not valid JSON"
-                ) from exc
+        evidence = Neo4jKnowledgeGraphStore._parse_evidence_records(
+            record["evidence_records"]
+        )
         return GraphConnection(
             source_entity=Neo4jKnowledgeGraphStore._record_to_entity(
                 record, "source_"
@@ -389,6 +628,22 @@ class Neo4jKnowledgeGraphStore:
             evidence=evidence,
         )
 
+    @staticmethod
+    def _parse_evidence_records(records: Sequence[str]) -> list[RelationshipEvidence]:
+        evidence: list[RelationshipEvidence] = []
+        evidence_ids: set[str] = set()
+        for raw_record in records or []:
+            try:
+                parsed = RelationshipEvidence.model_validate_json(raw_record)
+            except (ValueError, TypeError) as exc:
+                raise KnowledgeGraphStoreError(
+                    "Stored relationship evidence is not valid JSON"
+                ) from exc
+            if parsed.evidence_id not in evidence_ids:
+                evidence.append(parsed)
+                evidence_ids.add(parsed.evidence_id)
+        return evidence
+
 
 def _semantic_key(source_entity: str, relationship_type: str, target_entity: str) -> str:
     payload = f"{source_entity}\0{relationship_type}\0{target_entity}".encode("utf-8")
@@ -400,3 +655,15 @@ def _dump_json(value: Any) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError) as exc:
         raise KnowledgeGraphInputError("Graph provenance must be JSON serializable") from exc
+
+
+def _load_json_metadata(value: str | None) -> dict[str, Any]:
+    try:
+        metadata = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise KnowledgeGraphStoreError(
+            "Stored chunk metadata is not valid JSON"
+        ) from exc
+    if not isinstance(metadata, dict):
+        raise KnowledgeGraphStoreError("Stored chunk metadata must be a JSON object")
+    return metadata
